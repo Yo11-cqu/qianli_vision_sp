@@ -1,5 +1,6 @@
 #include "target.hpp"
 
+#include <algorithm>
 #include <numeric>
 
 #include "tools/logger.hpp"
@@ -135,10 +136,9 @@ void Target::predict(double dt)
   ekf_.predict(F, Q, f);
 }
 
-void Target::update(const Armor & armor)
+int Target::match_id(const Armor & armor) const
 {
-  // 装甲板匹配
-  int id;
+  int id = 0;
   auto min_angle_error = 1e10;
   const std::vector<Eigen::Vector4d> & xyza_list = armor_xyza_list();
 
@@ -156,7 +156,7 @@ void Target::update(const Armor & armor)
     });
 
   // 取前3个distance最小的装甲板
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < std::min(3, armor_num_); i++) {
     const auto & xyza = xyza_i_list[i].first;
     Eigen::Vector3d ypd = tools::xyz2ypd(xyza.head(3));
     auto angle_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - xyza[3])) +
@@ -168,6 +168,13 @@ void Target::update(const Armor & armor)
     }
   }
 
+  return id;
+}
+
+void Target::update(const Armor & armor) { update(armor, match_id(armor)); }
+
+void Target::update(const Armor & armor, int id)
+{
   if (id != 0) jumped = true;
 
   if (id != last_id) {
@@ -182,6 +189,27 @@ void Target::update(const Armor & armor)
   update_count_++;
 
   update_ypda(armor, id);
+}
+
+int Target::armor_num() const { return armor_num_; }
+
+Eigen::Vector4d Target::armor_xyza(int id) const
+{
+  id = (id % armor_num_ + armor_num_) % armor_num_;
+  auto angle = tools::limit_rad(ekf_.x[6] + id * 2 * CV_PI / armor_num_);
+  auto xyz = h_armor_xyz(ekf_.x, id);
+  return {xyz[0], xyz[1], xyz[2], angle};
+}
+
+std::vector<Eigen::Vector4d> Target::adjacent_armor_xyza_list(int current_id) const
+{
+  std::vector<Eigen::Vector4d> result;
+  result.push_back(armor_xyza(current_id + 1));
+
+  int other_id = (current_id - 1 + armor_num_) % armor_num_;
+  if (other_id != (current_id + 1) % armor_num_) result.push_back(armor_xyza(other_id));
+
+  return result;
 }
 
 void Target::update_ypda(const Armor & armor, int id)

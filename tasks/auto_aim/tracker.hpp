@@ -7,6 +7,7 @@
 #include <string>
 
 #include "armor.hpp"
+#include "outpost_refiner.hpp"
 #include "solver.hpp"
 #include "target.hpp"
 #include "tasks/omniperception/perceptron.hpp"
@@ -23,14 +24,16 @@ public:
 
   std::list<Target> track(
     std::list<Armor> & armors, std::chrono::steady_clock::time_point t,
-    bool use_enemy_color = true);
+    bool use_enemy_color = true, const cv::Mat & bgr_img = cv::Mat());
 
   std::tuple<omniperception::DetectionResult, std::list<Target>> track(
     const std::vector<omniperception::DetectionResult> & detection_queue, std::list<Armor> & armors,
-    std::chrono::steady_clock::time_point t, bool use_enemy_color = true);
+    std::chrono::steady_clock::time_point t, bool use_enemy_color = true,
+    const cv::Mat & bgr_img = cv::Mat());
 
 private:
   Solver & solver_;
+  OutpostRefiner refiner_;
   Color enemy_color_;
   int min_detect_count_;
   int max_temp_lost_count_;
@@ -47,7 +50,9 @@ private:
 
   bool set_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
 
-  bool update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
+  bool update_target(
+    std::list<Armor> & armors, std::chrono::steady_clock::time_point t,
+    const cv::Mat & bgr_img = cv::Mat());
 };
 
 }  // namespace auto_aim

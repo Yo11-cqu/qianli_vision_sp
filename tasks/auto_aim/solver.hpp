@@ -20,6 +20,14 @@ public:
 
   void solve(Armor & armor) const;
 
+  bool solve(
+    Armor & armor, const std::vector<cv::Point3f> & object_points,
+    const std::vector<cv::Point2f> & image_points, double * mean_error = nullptr) const;
+
+  const std::vector<cv::Point3f> & object_points(ArmorType type) const;
+
+  Eigen::Matrix3d R_armor2world(double yaw, ArmorName name) const;
+
   std::vector<cv::Point2f> reproject_armor(
     const Eigen::Vector3d & xyz_in_world, double yaw, ArmorType type, ArmorName name) const;
 
@@ -34,6 +42,9 @@ private:
   Eigen::Matrix3d R_camera2gimbal_;
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;
+
+  void update_armor_pose(
+    Armor & armor, const cv::Vec3d & rvec, const cv::Vec3d & tvec, bool optimize) const;
 
   void optimize_yaw(Armor & armor) const;
 

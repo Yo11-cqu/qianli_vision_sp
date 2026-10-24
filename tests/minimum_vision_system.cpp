@@ -62,7 +62,7 @@ int main(int argc, char * argv[])
 
     Eigen::Vector3d gimbal_pos = tools::eulers(solver.R_gimbal2world(), 2, 1, 0);
 
-    auto targets = tracker.track(armors, t);
+    auto targets = tracker.track(armors, t, true, img);
 
     auto command = aimer.aim(targets, t, 22);
 

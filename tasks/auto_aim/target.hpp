@@ -32,6 +32,12 @@ public:
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
   void update(const Armor & armor);
+  void update(const Armor & armor, int id);
+
+  int match_id(const Armor & armor) const;
+  int armor_num() const;
+  Eigen::Vector4d armor_xyza(int id) const;
+  std::vector<Eigen::Vector4d> adjacent_armor_xyza_list(int current_id) const;
 
   Eigen::VectorXd ekf_x() const;
   const tools::ExtendedKalmanFilter & ekf() const;

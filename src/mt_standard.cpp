@@ -93,7 +93,7 @@ int main(int argc, char * argv[])
 
       Eigen::Vector3d ypr = tools::eulers(solver.R_gimbal2world(), 2, 1, 0);
 
-      auto targets = tracker.track(armors, t);
+      auto targets = tracker.track(armors, t, true, img);
 
       commandgener.push(targets, t, cboard.bullet_speed, ypr);  // 发送给决策线程
 

@@ -11,6 +11,7 @@ namespace auto_aim
 {
 Tracker::Tracker(const std::string & config_path, Solver & solver)
 : solver_{solver},
+  refiner_{config_path, solver},
   detect_count_(0),
   temp_lost_count_(0),
   state_{"lost"},
@@ -29,7 +30,8 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
 std::string Tracker::state() const { return state_; }
 
 std::list<Target> Tracker::track(
-  std::list<Armor> & armors, std::chrono::steady_clock::time_point t, bool use_enemy_color)
+  std::list<Armor> & armors, std::chrono::steady_clock::time_point t, bool use_enemy_color,
+  const cv::Mat & bgr_img)
 {
   auto dt = tools::delta_time(t, last_timestamp_);
   last_timestamp_ = t;
@@ -67,7 +69,7 @@ std::list<Target> Tracker::track(
   }
 
   else {
-    found = update_target(armors, t);
+    found = update_target(armors, t, bgr_img);
   }
 
   state_machine(found);
@@ -97,7 +99,7 @@ std::list<Target> Tracker::track(
 
 std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
   const std::vector<omniperception::DetectionResult> & detection_queue, std::list<Armor> & armors,
-  std::chrono::steady_clock::time_point t, bool use_enemy_color)
+  std::chrono::steady_clock::time_point t, bool use_enemy_color, const cv::Mat & bgr_img)
 {
   omniperception::DetectionResult switch_target{std::list<Armor>(), t, 0, 0};
   omniperception::DetectionResult temp_target{std::list<Armor>(), t, 0, 0};
@@ -157,7 +159,7 @@ std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
   }
 
   else {
-    found = update_target(armors, t);
+    found = update_target(armors, t, bgr_img);
   }
 
   pre_state_ = state_;
@@ -263,7 +265,8 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
   return true;
 }
 
-bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t)
+bool Tracker::update_target(
+  std::list<Armor> & armors, std::chrono::steady_clock::time_point t, const cv::Mat & bgr_img)
 {
   target_.predict(t);
 
@@ -286,7 +289,15 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
 
     solver_.solve(armor);
 
-    target_.update(armor);
+    if (
+      target_.name == ArmorName::outpost && !bgr_img.empty() && target_.jumped &&
+      target_.convergened()) {
+      int id = target_.match_id(armor);
+      refiner_.refine(armor, target_, id, bgr_img);
+      target_.update(armor, id);
+    } else {
+      target_.update(armor);
+    }
   }
 
   return true;

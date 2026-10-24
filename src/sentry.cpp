@@ -82,7 +82,7 @@ int main(int argc, char * argv[])
 
     decider.set_priority(armors);
 
-    auto targets = tracker.track(armors, timestamp);
+    auto targets = tracker.track(armors, timestamp, true, img);
 
     io::Command command{false, false, 0, 0};
 
