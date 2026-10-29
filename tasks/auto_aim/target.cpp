@@ -1,5 +1,7 @@
 #include "target.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <numeric>
 
 #include "tools/logger.hpp"
@@ -9,17 +11,23 @@ namespace auto_aim
 {
 Target::Target(
   const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
-  Eigen::VectorXd P0_dig)
+  Eigen::VectorXd P0_dig, double outpost_min_height_separation)
 : name(armor.name),
   armor_type(armor.type),
   jumped(false),
   last_id(0),
-  update_count_(0),
   armor_num_(armor_num),
-  t_(t),
+  switch_count_(0),
+  update_count_(0),
   is_switch_(false),
   is_converged_(false),
-  switch_count_(0)
+  is_outpost_(armor.name == ArmorName::outpost),
+  outpost_min_height_separation_(
+    std::isfinite(outpost_min_height_separation) && outpost_min_height_separation >= 0.015 &&
+        outpost_min_height_separation <= 0.15
+      ? outpost_min_height_separation
+      : OUTPOST_HEIGHT_MIN_SEPARATION),
+  t_(t)
 {
   auto r = radius;
   priority = armor.priority;
@@ -47,6 +55,15 @@ Target::Target(
   };
 
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
+
+  if (is_outpost_) {
+    outpost_observed_xyza_ = Eigen::Vector4d{xyz[0], xyz[1], xyz[2], ypr[0]};
+    outpost_observed_t_ = t;
+    outpost_observed_confidence_ = std::isfinite(armor.confidence) ? armor.confidence : 0.0;
+    has_outpost_observation_ = true;
+    outpost_height_known_[0] = true;
+    outpost_height_offsets_[0] = 0.0;
+  }
 }
 
 Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
@@ -137,8 +154,15 @@ void Target::predict(double dt)
 
 void Target::update(const Armor & armor)
 {
+  if (
+    is_outpost_ &&
+    (!armor.xyz_in_world.allFinite() || !armor.ypr_in_world.allFinite() ||
+     !armor.ypd_in_world.allFinite()))
+    return;
+
   // 装甲板匹配
   int id;
+  if (is_outpost_) id = 0;
   auto min_angle_error = 1e10;
   const std::vector<Eigen::Vector4d> & xyza_list = armor_xyza_list();
 
@@ -168,6 +192,33 @@ void Target::update(const Armor & armor)
     }
   }
 
+  update_outpost_height(armor, id);
+
+  if (is_outpost_) {
+    const double expected_z = h_armor_xyz(ekf_.x, id)[2];
+    const double z_residual = armor.xyz_in_world[2] - expected_z;
+    const double z_gate = OUTPOST_HEIGHT_RESIDUAL_TOLERANCE;
+    const double observed_offset = armor.xyz_in_world[2] - ekf_.x[4];
+    const bool finite_height = std::isfinite(observed_offset);
+    const bool height_plausible = outpost_height_known_[id]
+                                    ? std::abs(z_residual) <= z_gate
+                                    : finite_height &&
+                                        std::abs(observed_offset) <= OUTPOST_MAX_HEIGHT_OFFSET;
+
+    const double confidence = std::isfinite(armor.confidence) ? armor.confidence : 0.0;
+    if (
+      height_plausible &&
+      (!has_outpost_observation_ || t_ > outpost_observed_t_ ||
+       (t_ == outpost_observed_t_ && confidence > outpost_observed_confidence_))) {
+      outpost_observed_xyza_ = Eigen::Vector4d{
+        armor.xyz_in_world[0], armor.xyz_in_world[1], armor.xyz_in_world[2],
+        armor.ypr_in_world[0]};
+      outpost_observed_t_ = t_;
+      outpost_observed_confidence_ = confidence;
+      has_outpost_observation_ = true;
+    }
+  }
+
   if (id != 0) jumped = true;
 
   if (id != last_id) {
@@ -181,7 +232,20 @@ void Target::update(const Armor & armor)
   last_id = id;
   update_count_++;
 
-  update_ypda(armor, id);
+  if (is_outpost_) {
+    Armor filtered_armor = armor;
+    const double expected_z = h_armor_xyz(ekf_.x, id)[2];
+    const double z_residual = armor.xyz_in_world[2] - expected_z;
+    const double z_gate = OUTPOST_HEIGHT_RESIDUAL_TOLERANCE;
+    if (
+      !outpost_height_known_[id] || !std::isfinite(z_residual) ||
+      std::abs(z_residual) > z_gate)
+      filtered_armor.xyz_in_world[2] = expected_z;
+    filtered_armor.ypd_in_world = tools::xyz2ypd(filtered_armor.xyz_in_world);
+    update_ypda(filtered_armor, id);
+  } else {
+    update_ypda(armor, id);
+  }
 }
 
 void Target::update_ypda(const Armor & armor, int id)
@@ -263,6 +327,169 @@ bool Target::convergened()
   return is_converged_;
 }
 
+bool Target::outpost_height_ready() const
+{
+  if (!is_outpost_ || !outpost_height_ready_) return false;
+  for (int i = 0; i < OUTPOST_ARMOR_NUM; ++i) {
+    if (!armor_height_known(i)) return false;
+  }
+  return true;
+}
+
+bool Target::armor_height_known(int id) const
+{
+  if (!is_outpost_ || id < 0 || id >= OUTPOST_ARMOR_NUM) return true;
+  if (
+    !outpost_height_separation_valid_ || !outpost_height_known_[id] ||
+    outpost_pending_count_[id] > 0)
+    return false;
+  if (
+    outpost_has_frame_sample_[id] &&
+    std::abs(outpost_frame_height_sample_[id] - outpost_height_offsets_[id]) >
+      OUTPOST_PENDING_CONSISTENCY_TOLERANCE)
+    return false;
+  return true;
+}
+
+int Target::outpost_height_level(int id) const
+{
+  if (!is_outpost_ || id < 0 || id >= OUTPOST_ARMOR_NUM || !armor_height_known(id)) return -1;
+  return outpost_height_levels_[id];
+}
+
+double Target::outpost_height_offset(int id) const
+{
+  if (!is_outpost_ || id < 0 || id >= OUTPOST_ARMOR_NUM) return 0.0;
+  return outpost_height_offsets_[id];
+}
+
+int Target::expected_next_outpost_id() const
+{
+  if (!is_outpost_ || last_id < 0 || last_id >= OUTPOST_ARMOR_NUM) return -1;
+  if (std::abs(ekf_.x[7]) < 0.3) return -1;
+  return ekf_.x[7] > 0 ? (last_id + 2) % OUTPOST_ARMOR_NUM : (last_id + 1) % OUTPOST_ARMOR_NUM;
+}
+
+bool Target::outpost_observation_fresh(std::chrono::steady_clock::time_point now) const
+{
+  if (!is_outpost_ || !has_outpost_observation_ || now < outpost_observed_t_) return false;
+  return now - outpost_observed_t_ <= OUTPOST_OBSERVATION_MAX_AGE;
+}
+
+std::optional<Eigen::Vector4d> Target::outpost_observed_xyza() const
+{
+  if (!outpost_observation_fresh(t_)) return std::nullopt;
+  return outpost_observed_xyza_;
+}
+
+void Target::update_outpost_height(const Armor & armor, int id)
+{
+  if (!is_outpost_ || id < 0 || id >= OUTPOST_ARMOR_NUM) return;
+  const double delta = armor.xyz_in_world[2] - ekf_.x[4];
+  if (!std::isfinite(delta) || std::abs(delta) > OUTPOST_MAX_HEIGHT_OFFSET) return;
+
+  const double confidence = std::isfinite(armor.confidence) ? armor.confidence : 0.0;
+  if (outpost_has_frame_sample_[id]) {
+    if (t_ == outpost_frame_sample_t_[id]) {
+      if (confidence > outpost_frame_sample_confidence_[id]) {
+        outpost_frame_height_sample_[id] = delta;
+        outpost_frame_sample_confidence_[id] = confidence;
+      }
+      return;
+    }
+    if (t_ < outpost_frame_sample_t_[id]) return;
+    if (t_ - outpost_frame_sample_t_[id] > OUTPOST_HEIGHT_SAMPLE_MAX_GAP) {
+      outpost_pending_count_[id] = 0;
+    } else {
+      accept_outpost_height_sample(id, outpost_frame_height_sample_[id]);
+    }
+  }
+
+  outpost_has_frame_sample_[id] = true;
+  outpost_frame_sample_t_[id] = t_;
+  outpost_frame_height_sample_[id] = delta;
+  outpost_frame_sample_confidence_[id] = confidence;
+}
+
+void Target::accept_outpost_height_sample(int id, double delta)
+{
+  if (outpost_height_known_[id] && std::abs(delta - outpost_height_offsets_[id]) <=
+                                      OUTPOST_PENDING_CONSISTENCY_TOLERANCE) {
+    outpost_pending_count_[id] = 0;
+    return;
+  }
+
+  if (outpost_pending_count_[id] > 0) {
+    const double median = outpost_pending_median(id);
+    if (std::abs(delta - median) > OUTPOST_PENDING_CONSISTENCY_TOLERANCE) {
+      outpost_pending_count_[id] = 0;
+    }
+  }
+  if (outpost_pending_count_[id] >= OUTPOST_REMAP_CONFIRM_FRAMES)
+    outpost_pending_count_[id] = OUTPOST_REMAP_CONFIRM_FRAMES - 1;
+  outpost_pending_samples_[id][outpost_pending_count_[id]] = delta;
+  outpost_pending_count_[id]++;
+
+  const double candidate = outpost_pending_median(id);
+  const int required_frames = outpost_height_known_[id]
+                                ? OUTPOST_REMAP_CONFIRM_FRAMES
+                                : OUTPOST_HEIGHT_CONFIRM_FRAMES;
+  if (outpost_pending_count_[id] < required_frames) return;
+
+  const bool was_known = outpost_height_known_[id];
+  outpost_height_offsets_[id] = candidate;
+  outpost_height_known_[id] = true;
+  outpost_pending_count_[id] = 0;
+  normalize_outpost_height_levels();
+
+  if (outpost_height_ready_ && !was_known) {
+    tools::logger()->info(
+      "[Target] outpost id {} height offset {:.3f} m, levels: {}/{}/{}", id,
+      outpost_height_offsets_[id], outpost_height_levels_[0], outpost_height_levels_[1],
+      outpost_height_levels_[2]);
+  } else if (was_known) {
+    tools::logger()->info(
+      "[Target] outpost id {} height mapping updated to {:.3f} m", id, candidate);
+  }
+}
+
+void Target::normalize_outpost_height_levels()
+{
+  outpost_height_ready_ = false;
+  outpost_height_separation_valid_ = true;
+  outpost_height_levels_.fill(-1);
+  for (int i = 0; i < OUTPOST_ARMOR_NUM; i++) {
+    if (!outpost_height_known_[i]) return;
+  }
+
+  std::array<double, OUTPOST_ARMOR_NUM> sorted_offsets = outpost_height_offsets_;
+  std::sort(sorted_offsets.begin(), sorted_offsets.end());
+  if (
+    sorted_offsets[1] - sorted_offsets[0] < outpost_min_height_separation_ ||
+    sorted_offsets[2] - sorted_offsets[1] < outpost_min_height_separation_) {
+    outpost_height_separation_valid_ = false;
+    tools::logger()->warn(
+      "[Target] outpost height planes too close: {:.3f}/{:.3f}/{:.3f} m", sorted_offsets[0],
+      sorted_offsets[1], sorted_offsets[2]);
+    return;
+  }
+
+  for (int i = 0; i < OUTPOST_ARMOR_NUM; ++i) {
+    const auto it = std::find(
+      sorted_offsets.begin(), sorted_offsets.end(), outpost_height_offsets_[i]);
+    outpost_height_levels_[i] = static_cast<int>(std::distance(sorted_offsets.begin(), it));
+  }
+  outpost_height_ready_ = true;
+}
+
+double Target::outpost_pending_median(int id) const
+{
+  std::array<double, OUTPOST_REMAP_CONFIRM_FRAMES> sorted{};
+  std::copy_n(outpost_pending_samples_[id].begin(), outpost_pending_count_[id], sorted.begin());
+  std::sort(sorted.begin(), sorted.begin() + outpost_pending_count_[id]);
+  return sorted[outpost_pending_count_[id] / 2];
+}
+
 // 计算出装甲板中心的坐标（考虑长短轴）
 Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
 {
@@ -273,6 +500,8 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
   auto armor_z = (use_l_h) ? x[4] + x[10] : x[4];
+  if (is_outpost_ && id >= 0 && id < OUTPOST_ARMOR_NUM)
+    armor_z += outpost_height_offsets_[id];
 
   return {armor_x, armor_y, armor_z};
 }
@@ -292,7 +521,6 @@ Eigen::MatrixXd Target::h_jacobian(const Eigen::VectorXd & x, int id) const
   auto dy_dl = (use_l_h) ? -std::sin(angle) : 0.0;
 
   auto dz_dh = (use_l_h) ? 1.0 : 0.0;
-
   // clang-format off
   Eigen::MatrixXd H_armor_xyza{
     {1, 0, 0, 0, 0, 0, dx_da, 0, dx_dr, dx_dl,     0},

@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cmath>
 #include <tuple>
 
 #include "tools/logger.hpp"
@@ -23,6 +24,25 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   min_detect_count_ = yaml["min_detect_count"].as<int>();
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
+  outpost_min_height_separation_ = Target::OUTPOST_HEIGHT_MIN_SEPARATION;
+  if (yaml["outpost_min_height_separation"].IsDefined()) {
+    try {
+      const double configured_separation = yaml["outpost_min_height_separation"].as<double>();
+      if (
+        std::isfinite(configured_separation) && configured_separation >= 0.015 &&
+        configured_separation <= 0.15) {
+        outpost_min_height_separation_ = configured_separation;
+      } else {
+        tools::logger()->warn(
+          "[Tracker] invalid outpost_min_height_separation {:.3f} m; using default {:.3f} m",
+          configured_separation, Target::OUTPOST_HEIGHT_MIN_SEPARATION);
+      }
+    } catch (const YAML::Exception &) {
+      tools::logger()->warn(
+        "[Tracker] outpost_min_height_separation is invalid; using default {:.3f} m",
+        Target::OUTPOST_HEIGHT_MIN_SEPARATION);
+    }
+  }
   normal_temp_lost_count_ = max_temp_lost_count_;
 }
 
@@ -235,6 +255,14 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
   auto & armor = armors.front();
   solver_.solve(armor);
 
+  if (
+    armor.name == ArmorName::outpost &&
+    (!armor.xyz_in_world.allFinite() || !armor.ypr_in_world.allFinite() ||
+     !armor.ypd_in_world.allFinite())) {
+    tools::logger()->warn("[Tracker] reject outpost initialization with non-finite pose");
+    return false;
+  }
+
   // 根据兵种优化初始化参数
   auto is_balance = (armor.type == ArmorType::big) &&
                     (armor.name == ArmorName::three || armor.name == ArmorName::four ||
@@ -246,8 +274,8 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
   }
 
   else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.2765, 3, P0_dig);
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 64, 64, 0.4, 100, 1e-4, 0, 0}};
+    target_ = Target(armor, t, 0.2765, 3, P0_dig, outpost_min_height_separation_);
   }
 
   else if (armor.name == ArmorName::base) {

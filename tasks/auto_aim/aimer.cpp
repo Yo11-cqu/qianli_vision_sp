@@ -42,6 +42,13 @@ io::Command Aimer::aim(
 
   if (bullet_speed < 14) bullet_speed = 23;
 
+  if (
+    target.name == ArmorName::outpost &&
+    !target.outpost_observation_fresh(std::chrono::steady_clock::now())) {
+    debug_aim_point = {false, Eigen::Vector4d::Zero()};
+    return {false, false, 0, 0};
+  }
+
   // 考虑detecor和tracker所消耗的时间，此外假设aimer的用时可忽略不计
   auto future = timestamp;
   if (to_now) {
@@ -146,6 +153,25 @@ AimPoint Aimer::choose_aim_point(const Target & target)
   Eigen::VectorXd ekf_x = target.ekf_x();
   std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
   auto armor_num = armor_xyza_list.size();
+  if (target.name == ArmorName::outpost && !target.outpost_height_ready()) {
+    const int last_id = target.last_id;
+    if (
+      last_id >= 0 && last_id < static_cast<int>(armor_num) &&
+      target.armor_height_known(last_id))
+      return {true, armor_xyza_list[last_id]};
+
+    const double center_yaw = std::atan2(ekf_x[2], ekf_x[0]);
+    const double coming_angle = 70 / 57.3;
+    const double leaving_angle = 30 / 57.3;
+    for (int i = 0; i < static_cast<int>(armor_num); ++i) {
+      if (!target.armor_height_known(i)) continue;
+      const double delta_angle = tools::limit_rad(armor_xyza_list[i][3] - center_yaw);
+      if (std::abs(delta_angle) > coming_angle) continue;
+      if (ekf_x[7] > 0 && delta_angle < leaving_angle) return {true, armor_xyza_list[i]};
+      if (ekf_x[7] < 0 && delta_angle > -leaving_angle) return {true, armor_xyza_list[i]};
+    }
+    return {false, armor_xyza_list[0]};
+  }
   // 如果装甲板未发生过跳变，则只有当前装甲板的位置已知
   if (!target.jumped) return {true, armor_xyza_list[0]};
 

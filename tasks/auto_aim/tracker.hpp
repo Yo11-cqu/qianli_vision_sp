@@ -37,6 +37,7 @@ private:
   int detect_count_;
   int temp_lost_count_;
   int outpost_max_temp_lost_count_;
+  double outpost_min_height_separation_;
   int normal_temp_lost_count_;
   std::string state_, pre_state_;
   Target target_;

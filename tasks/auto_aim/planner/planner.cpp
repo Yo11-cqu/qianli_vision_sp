@@ -10,6 +10,22 @@ using namespace std::chrono_literals;
 
 namespace auto_aim
 {
+namespace
+{
+std::vector<Eigen::Vector4d> usable_armors(const Target & target)
+{
+  auto armors = target.armor_xyza_list();
+  if (target.name == ArmorName::outpost && !target.outpost_height_ready()) {
+    std::vector<Eigen::Vector4d> known_armors;
+    for (int i = 0; i < static_cast<int>(armors.size()); ++i) {
+      if (target.armor_height_known(i)) known_armors.push_back(armors[i]);
+    }
+    return known_armors;
+  }
+  return armors;
+}
+}  // namespace
+
 Planner::Planner(const std::string & config_path)
 {
   auto yaml = tools::load(config_path);
@@ -26,6 +42,12 @@ Planner::Planner(const std::string & config_path)
 
 Plan Planner::plan(Target target, double bullet_speed)
 {
+  if (target.name == ArmorName::outpost && !target.outpost_observed_xyza().has_value())
+    return {false};
+
+  const auto armors = usable_armors(target);
+  if (armors.empty()) return {false};
+
   // 0. Check bullet speed
   if (bullet_speed < 10 || bullet_speed > 25) {
     bullet_speed = 22;
@@ -34,7 +56,7 @@ Plan Planner::plan(Target target, double bullet_speed)
   // 1. Predict fly_time
   Eigen::Vector3d xyz;
   auto min_dist = 1e10;
-  for (auto & xyza : target.armor_xyza_list()) {
+  for (auto & xyza : armors) {
     auto dist = xyza.head<2>().norm();
     if (dist < min_dist) {
       min_dist = dist;
@@ -159,7 +181,7 @@ Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_sp
   double yaw;
   auto min_dist = 1e10;
 
-  for (auto & xyza : target.armor_xyza_list()) {
+  for (auto & xyza : usable_armors(target)) {
     auto dist = xyza.head<2>().norm();
     if (dist < min_dist) {
       min_dist = dist;
